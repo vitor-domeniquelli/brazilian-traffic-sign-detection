@@ -1,0 +1,19 @@
+{
+  "run": "run07",
+  "classe_esperada": "R-3_sentido-proibido",
+  "comando_esperado": "tras",
+  "classe_detectada": "R-3_sentido-proibido",
+  "confianca_decisao": 0.9837889671325684,
+  "comando_emitido": "tras",
+  "decisao_correta": true,
+  "manobra_executada": true,
+  "datahora": "2026-08-17T19:27:06",
+  "duracao_corrida_s": 3.74,
+  "n_frames": 15,
+  "modelo": "models/best.pt",
+  "conf_min": 0.7,
+  "limiar_bbox_w": 90,
+  "duracao_acao_ms": 1000,
+  "velocidade": 180,
+  "flip": true
+}

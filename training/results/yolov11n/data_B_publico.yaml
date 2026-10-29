@@ -1,0 +1,17 @@
+names:
+- R-25a
+- R-25b
+- R-26
+- R-3
+- R-4a
+- R-4b
+nc: 6
+roboflow:
+  license: CC BY 4.0
+  project: normal-brazilian-traffic-signs-88eft
+  url: https://universe.roboflow.com/vitor-chagas/normal-brazilian-traffic-signs-88eft/dataset/1
+  version: 1
+  workspace: vitor-chagas
+test: ../test/images
+train: ../train/images
+val: ../valid/images

@@ -1,0 +1,19 @@
+{
+  "run": "run05",
+  "classe_esperada": "R-4b_proibido-direita",
+  "comando_esperado": "esq",
+  "classe_detectada": "R-4b_proibido-direita",
+  "confianca_decisao": 0.9354996085166931,
+  "comando_emitido": "esq",
+  "decisao_correta": true,
+  "manobra_executada": true,
+  "datahora": "2026-08-17T20:19:25",
+  "duracao_corrida_s": 4.35,
+  "n_frames": 15,
+  "modelo": "models/best.pt",
+  "conf_min": 0.7,
+  "limiar_bbox_w": 90,
+  "duracao_acao_ms": 800,
+  "velocidade": 180,
+  "flip": true
+}

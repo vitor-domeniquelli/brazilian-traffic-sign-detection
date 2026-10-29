@@ -1,0 +1,19 @@
+{
+  "run": "run05",
+  "classe_esperada": "R-26_frente",
+  "comando_esperado": "frente",
+  "classe_detectada": "R-26_frente",
+  "confianca_decisao": 0.9552184343338013,
+  "comando_emitido": "frente",
+  "decisao_correta": true,
+  "manobra_executada": true,
+  "datahora": "2026-08-17T20:30:37",
+  "duracao_corrida_s": 4.31,
+  "n_frames": 18,
+  "modelo": "models/best.pt",
+  "conf_min": 0.7,
+  "limiar_bbox_w": 90,
+  "duracao_acao_ms": 1500,
+  "velocidade": 180,
+  "flip": true
+}

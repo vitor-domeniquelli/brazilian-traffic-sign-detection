@@ -1,0 +1,16 @@
+frame_id,t_rel_s,t_captura_ms,t_inferencia_ms,t_decisao_ms,t_comando_ms,classe_detectada,confianca,bbox_w,bbox_h,estado,comando_enviado
+1,0.181,174.6,180.28,0.003,84.3,,,,,PROCURANDO,frente
+2,0.439,273.55,164.34,0.003,,R-4a_proibido-esquerda,0.804,30,31,APROXIMANDO,
+3,0.637,176.99,185.96,0.006,94.57,R-3_sentido-proibido,0.708,29,32,APROXIMANDO,frente
+4,0.905,287.44,167.0,0.004,,R-3_sentido-proibido,0.729,28,32,APROXIMANDO,
+5,1.073,177.16,157.27,0.004,104.47,R-4a_proibido-esquerda,0.839,31,32,APROXIMANDO,frente
+6,1.354,270.24,167.59,0.006,,R-3_sentido-proibido,0.964,34,36,APROXIMANDO,
+7,1.635,176.13,273.18,0.011,87.36,R-3_sentido-proibido,0.972,37,40,APROXIMANDO,frente
+8,1.909,371.78,175.56,0.004,,R-3_sentido-proibido,0.969,48,50,APROXIMANDO,
+9,2.064,182.23,148.15,0.004,153.58,R-3_sentido-proibido,0.987,56,59,APROXIMANDO,frente
+10,2.398,310.56,170.93,0.004,100.55,R-3_sentido-proibido,0.977,77,79,APROXIMANDO,frente
+11,2.659,285.16,147.73,0.012,,R-3_sentido-proibido,0.984,109,112,AGINDO,
+12,2.804,163.71,128.42,0.003,135.29,R-3_sentido-proibido,0.978,225,208,AGINDO,tras
+13,3.119,286.03,157.84,0.003,85.42,,,,,AGINDO,tras
+14,3.367,257.6,147.69,0.002,,,,,,AGINDO,
+15,3.494,154.66,120.78,0.002,101.89,,,,,AGINDO,tras

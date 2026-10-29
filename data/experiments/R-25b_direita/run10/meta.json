@@ -1,0 +1,19 @@
+{
+  "run": "run10",
+  "classe_esperada": "R-25b_direita",
+  "comando_esperado": "dir",
+  "classe_detectada": "R-25b_direita",
+  "confianca_decisao": 0.9501468539237976,
+  "comando_emitido": "dir",
+  "decisao_correta": true,
+  "manobra_executada": false,
+  "datahora": "2026-08-17T19:19:43",
+  "duracao_corrida_s": 4.48,
+  "n_frames": 15,
+  "modelo": "models/best.pt",
+  "conf_min": 0.7,
+  "limiar_bbox_w": 100,
+  "duracao_acao_ms": 800,
+  "velocidade": 180,
+  "flip": true
+}

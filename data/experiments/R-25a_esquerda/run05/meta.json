@@ -1,0 +1,19 @@
+{
+  "run": "run05",
+  "classe_esperada": "R-25a_esquerda",
+  "comando_esperado": "esq",
+  "classe_detectada": "R-25a_esquerda",
+  "confianca_decisao": 0.9656366109848022,
+  "comando_emitido": "esq",
+  "decisao_correta": true,
+  "manobra_executada": true,
+  "datahora": "2026-08-17T19:22:05",
+  "duracao_corrida_s": 4.29,
+  "n_frames": 20,
+  "modelo": "models/best.pt",
+  "conf_min": 0.7,
+  "limiar_bbox_w": 100,
+  "duracao_acao_ms": 800,
+  "velocidade": 180,
+  "flip": true
+}

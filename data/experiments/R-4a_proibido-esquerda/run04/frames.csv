@@ -1,0 +1,10 @@
+frame_id,t_rel_s,t_captura_ms,t_inferencia_ms,t_decisao_ms,t_comando_ms,classe_detectada,confianca,bbox_w,bbox_h,estado,comando_enviado
+1,0.254,291.68,252.58,0.005,105.51,R-4a_proibido-esquerda,0.925,31,30,APROXIMANDO,frente
+2,0.589,375.78,212.4,0.006,89.01,R-4a_proibido-esquerda,0.902,31,30,APROXIMANDO,frente
+3,1.068,313.79,376.87,0.02,83.82,R-4a_proibido-esquerda,0.906,30,30,APROXIMANDO,frente
+4,1.628,493.64,443.35,0.006,84.55,R-4a_proibido-esquerda,0.962,34,31,APROXIMANDO,frente
+5,2.043,541.81,316.82,0.008,104.08,R-4a_proibido-esquerda,0.977,46,45,APROXIMANDO,frente
+6,2.482,434.38,321.67,0.006,92.15,R-4a_proibido-esquerda,0.975,70,70,APROXIMANDO,frente
+7,2.796,422.55,212.91,0.027,113.62,R-4a_proibido-esquerda,0.978,148,151,AGINDO,dir
+8,3.171,341.3,246.66,0.004,89.35,,,,,AGINDO,dir
+9,3.464,345.51,194.51,0.004,,,,,,AGINDO,

@@ -1,0 +1,19 @@
+{
+  "run": "run02",
+  "classe_esperada": "R-4a_proibido-esquerda",
+  "comando_esperado": "dir",
+  "classe_detectada": null,
+  "confianca_decisao": null,
+  "comando_emitido": null,
+  "decisao_correta": false,
+  "manobra_executada": false,
+  "datahora": "2026-08-17T19:30:20",
+  "duracao_corrida_s": 10.05,
+  "n_frames": 39,
+  "modelo": "models/best.pt",
+  "conf_min": 0.7,
+  "limiar_bbox_w": 90,
+  "duracao_acao_ms": null,
+  "velocidade": 180,
+  "flip": true
+}

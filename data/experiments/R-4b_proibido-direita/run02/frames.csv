@@ -1,0 +1,16 @@
+frame_id,t_rel_s,t_captura_ms,t_inferencia_ms,t_decisao_ms,t_comando_ms,classe_detectada,confianca,bbox_w,bbox_h,estado,comando_enviado
+1,0.151,143.16,150.11,0.003,91.02,,,,,PROCURANDO,frente
+2,0.415,252.69,162.09,0.002,,,,,,PROCURANDO,
+3,0.599,173.35,172.61,0.004,62.85,R-4b_proibido-direita,0.738,30,30,APROXIMANDO,frente
+4,0.918,244.35,247.56,0.002,94.11,,,,,PROCURANDO,frente
+5,1.173,353.94,148.47,0.003,,R-4a_proibido-esquerda,0.797,33,31,APROXIMANDO,
+6,1.337,169.22,143.01,0.004,101.45,R-4a_proibido-esquerda,0.727,36,33,APROXIMANDO,frente
+7,1.704,255.65,254.31,0.003,70.14,R-4b_proibido-direita,0.762,40,39,APROXIMANDO,frente
+8,1.952,331.72,170.92,0.006,,R-4b_proibido-direita,0.936,52,49,APROXIMANDO,
+9,2.235,180.41,273.18,0.006,61.24,R-4b_proibido-direita,0.951,60,57,APROXIMANDO,frente
+10,2.521,344.02,214.69,0.004,,R-4b_proibido-direita,0.955,73,69,APROXIMANDO,
+11,2.742,222.74,213.7,0.009,85.36,R-4b_proibido-direita,0.955,73,69,APROXIMANDO,frente
+12,3.047,305.9,212.75,0.005,56.44,R-4b_proibido-direita,0.956,75,71,APROXIMANDO,frente
+13,3.342,279.03,228.39,0.033,,R-4b_proibido-direita,0.933,115,104,AGINDO,
+14,3.608,237.98,256.27,0.004,137.74,R-4b_proibido-direita,0.942,156,185,AGINDO,esq
+15,3.998,406.11,240.51,0.004,76.01,,,,,AGINDO,esq
