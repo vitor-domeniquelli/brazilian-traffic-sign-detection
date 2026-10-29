@@ -1,69 +1,76 @@
-/* =====================================================================
- *  ROBO ESP32-CAM
- *  ---------------------------------------------------------------
- *  Alvo   : ESP32-CAM AI Thinker + L298N + 2x 18650 (2S)
- *  Board  : "ESP32 Dev Module"
- *  Core   : arduino-esp32 3.3.10
+/*
+ * ESP32-CAM robot firmware
  *
- *  MAPA DE CANAIS LEDC - NAO DEIXE NENHUM AUTOMATICO
- *    canal 0 / timer 0 .... XCLK da camera   (reservado pelo driver)
- *    canal 2 / timer 1 .... farol GPIO4
- *    canal 4 / timer 2 .... PWM motor esquerdo
- *    canal 6 / timer 3 .... PWM motor direito
+ * Streams MJPEG video from the onboard camera and drives two DC motor pairs
+ * through an L298N, following HTTP commands sent by the inference host.
  *
- * ===================================================================== */
+ * Hardware : ESP32-CAM (AI Thinker) + L298N + 2x 18650 (2S)
+ * Board    : "ESP32 Dev Module", PSRAM enabled
+ * Core     : arduino-esp32 3.3.10
+ *
+ * Endpoints (access point at 192.168.4.1)
+ *   :80/            manual control page
+ *   :80/cmd         ?dir=forward|backward|left|right|stop  &speed=0..255
+ *   :80/light       ?level=0..LIGHT_MAX  or  ?on=0|1
+ *   :80/photo       single JPEG frame
+ *   :81/stream      MJPEG stream
+ *
+ * LEDC channels are assigned explicitly so that the camera clock, the light
+ * and the motors each use a separate timer:
+ *   channel 0 / timer 0   camera XCLK (reserved by the camera driver)
+ *   channel 2 / timer 1   light (GPIO 4)
+ *   channel 4 / timer 2   left motor PWM
+ *   channel 6 / timer 3   right motor PWM
+ */
 
 #include <WiFi.h>
 #include "esp_camera.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
-#include "esp_system.h"
 
-/* ----------------------- Configuracao ----------------------------- */
-#define AP_SSID        "ROBO-TESTE"
+/* Wi-Fi access point */
+#define AP_SSID        "ROBOT-AP"
 #define AP_PASS        "12345678"
-#define AP_CHANNEL     1          // teste 1, 6 ou 11 se houver perda
+#define AP_CHANNEL     1
 #define AP_MAX_CONN    1
-
 #define TX_POWER       WIFI_POWER_11dBm
-#define FRAME_SIZE     FRAMESIZE_VGA
-#define JPEG_QUALITY   12
-#define STREAM_INTERVALO_MS   150
-#define STATS_A_CADA_N_FRAMES 30
-#define HEARTBEAT_MS          5000
 
-/* --- Motores --- */
-#define PIN_L_FRENTE   15
-#define PIN_L_TRAS     33
-#define PIN_R_FRENTE   13
-#define PIN_R_TRAS     14
-#define PIN_EN_L        2
-#define PIN_EN_R       12
+/* Camera */
+#define FRAME_SIZE          FRAMESIZE_VGA
+#define JPEG_QUALITY        12
+#define STREAM_INTERVAL_MS  150
 
-#define CANAL_PWM_L     4
-#define CANAL_PWM_R     6
-#define PWM_FREQ     5000
-#define PWM_BITS        8
+/* Motors */
+#define PIN_L_FORWARD   15
+#define PIN_L_BACKWARD  33
+#define PIN_R_FORWARD   13
+#define PIN_R_BACKWARD  14
+#define PIN_EN_L         2
+#define PIN_EN_R        12
 
-#define VEL_PADRAO    180
-#define VEL_MINIMA     80
-#define RAMPA_PASSO    12
-#define RAMPA_MS       15
-#define DEADTIME_MS    40
-#define TIMEOUT_COMANDO_MS 900
-#define GIRO_NO_EIXO   true
+#define PWM_CHANNEL_L    4
+#define PWM_CHANNEL_R    6
+#define PWM_FREQ      5000
+#define PWM_BITS         8
 
-/* --- Farol --- */
-#define PIN_FAROL       4
-#define CANAL_FAROL     2         // timer 1: livre
-#define FAROL_FREQ   5000
-#define FAROL_BITS      8
-#define FAROL_MAX      80         // teto de seguranca (0..255)
-#define FAROL_RAMPA_PASSO  6      // suaviza o degrau de corrente
-#define FAROL_RAMPA_MS     20
-/* ------------------------------------------------------------------ */
+#define DEFAULT_SPEED      180
+#define MIN_SPEED           80
+#define RAMP_STEP           12
+#define RAMP_INTERVAL_MS    15
+#define DEADTIME_MS         40
+#define COMMAND_TIMEOUT_MS 900   // motors stop if no command arrives within this time
+#define SPIN_IN_PLACE     true   // turns reverse the inner wheels instead of stopping them
 
-/* Pinos AI Thinker ESP32-CAM */
+/* Light */
+#define PIN_LIGHT              4
+#define LIGHT_CHANNEL          2
+#define LIGHT_FREQ          5000
+#define LIGHT_BITS             8
+#define LIGHT_MAX             80   // brightness limit (0..255)
+#define LIGHT_RAMP_STEP        6   // gradual change limits the current step on the battery
+#define LIGHT_RAMP_INTERVAL_MS 20
+
+/* AI Thinker ESP32-CAM camera pins */
 #define PWDN_GPIO_NUM   32
 #define RESET_GPIO_NUM  -1
 #define XCLK_GPIO_NUM    0
@@ -81,165 +88,131 @@
 #define HREF_GPIO_NUM   23
 #define PCLK_GPIO_NUM   22
 
-static httpd_handle_t servidorWeb    = NULL;
-static httpd_handle_t servidorStream = NULL;
+static httpd_handle_t webServer    = NULL;
+static httpd_handle_t streamServer = NULL;
 
-static uint32_t heartbeatAnterior = 0;
-static uint32_t contadorHeartbeat = 0;
-static volatile bool     streamAtivo = false;
-static volatile uint32_t framesNoStream = 0;
+static int8_t  dirL = 0, dirR = 0;
+static uint8_t targetDutyL = 0, targetDutyR = 0;
+static uint8_t dutyL = 0, dutyR = 0;
+static uint8_t speed = DEFAULT_SPEED;
+static uint32_t lastCommandTime = 0;
+static uint32_t lastRampTime = 0;
+static const char* currentCommand = "stop";
 
-static int8_t  sentidoL = 0, sentidoR = 0;
-static uint8_t dutyAlvoL = 0, dutyAlvoR = 0;
-static uint8_t dutyAtualL = 0, dutyAtualR = 0;
-static uint8_t velocidade = VEL_PADRAO;
-static uint32_t ultimoComando = 0;
-static uint32_t ultimaRampa = 0;
-static const char* comandoAtual = "parar";
+static uint8_t targetLight = 0, light = 0;
+static uint32_t lastLightRampTime = 0;
 
-static uint8_t farolAlvo = 0, farolAtual = 0;
-static uint32_t ultimaRampaFarol = 0;
+static const char* STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=frame";
+static const char* STREAM_BOUNDARY     = "\r\n--frame\r\n";
+static const char* STREAM_PART         = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
-static const char* STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=quadro";
-static const char* STREAM_BOUNDARY     = "\r\n--quadro\r\n";
-static const char* STREAM_PARTE        = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+/* ------------------------------ Light ------------------------------ */
 
-/* ------------------------- Diagnostico ---------------------------- */
-
-static const char* motivoReset(esp_reset_reason_t r) {
-  switch (r) {
-    case ESP_RST_POWERON:   return "POWERON  - energizacao normal";
-    case ESP_RST_EXT:       return "EXT      - pino de reset externo";
-    case ESP_RST_SW:        return "SW       - esp_restart() por software";
-    case ESP_RST_PANIC:     return "PANIC    - excecao / crash de codigo";
-    case ESP_RST_INT_WDT:   return "INT_WDT  - interrupt watchdog";
-    case ESP_RST_TASK_WDT:  return "TASK_WDT - task watchdog";
-    case ESP_RST_WDT:       return "WDT      - outro watchdog";
-    case ESP_RST_BROWNOUT:  return "BROWNOUT - QUEDA DE TENSAO  <<<<<<";
-    default:                return "UNKNOWN  - motivo nao identificado";
-  }
+static void initLight() {
+  ledcAttachChannel(PIN_LIGHT, LIGHT_FREQ, LIGHT_BITS, LIGHT_CHANNEL);
+  ledcWrite(PIN_LIGHT, 0);
+  targetLight = light = 0;
 }
 
-static void marco(const char* etapa) {
-  Serial.printf("[%6lu ms] %-28s | heap %6u B | menor %6u B\n",
-                (unsigned long)millis(), etapa,
-                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
-  Serial.flush();
+static void setLight(int level) {
+  targetLight = (uint8_t)constrain(level, 0, LIGHT_MAX);
 }
 
-/* ---------------------------- Farol ------------------------------- */
+static void updateLightRamp() {
+  uint32_t now = millis();
+  if (now - lastLightRampTime < LIGHT_RAMP_INTERVAL_MS) return;
+  lastLightRampTime = now;
+  if (light == targetLight) return;
 
-static void iniciaFarol() {
-  bool ok = ledcAttachChannel(PIN_FAROL, FAROL_FREQ, FAROL_BITS, CANAL_FAROL);
-  Serial.printf("       farol : pino %d -> canal %d [%s], teto %d/255\n",
-                PIN_FAROL, CANAL_FAROL, ok ? "OK" : "FALHOU", FAROL_MAX);
-  ledcWrite(PIN_FAROL, 0);
-  farolAlvo = farolAtual = 0;
-}
-
-static void defineFarol(int nivel) {
-  farolAlvo = (uint8_t)constrain(nivel, 0, FAROL_MAX);
-}
-
-static void atualizaRampaFarol() {
-  uint32_t agora = millis();
-  if (agora - ultimaRampaFarol < FAROL_RAMPA_MS) return;
-  ultimaRampaFarol = agora;
-  if (farolAtual == farolAlvo) return;
-
-  if (farolAtual < farolAlvo)
-    farolAtual = min((int)farolAlvo, (int)farolAtual + FAROL_RAMPA_PASSO);
+  if (light < targetLight)
+    light = min((int)targetLight, (int)light + LIGHT_RAMP_STEP);
   else
-    farolAtual = max((int)farolAlvo, (int)farolAtual - FAROL_RAMPA_PASSO);
-  ledcWrite(PIN_FAROL, farolAtual);
+    light = max((int)targetLight, (int)light - LIGHT_RAMP_STEP);
+  ledcWrite(PIN_LIGHT, light);
 }
 
-/* --------------------------- Motores ------------------------------ */
+/* ------------------------------ Motors ----------------------------- */
 
-static void iniciaMotores() {
-  marco(">>> iniciaMotores()");
-  pinMode(PIN_L_FRENTE, OUTPUT);  digitalWrite(PIN_L_FRENTE, LOW);
-  pinMode(PIN_L_TRAS,   OUTPUT);  digitalWrite(PIN_L_TRAS,   LOW);
-  pinMode(PIN_R_FRENTE, OUTPUT);  digitalWrite(PIN_R_FRENTE, LOW);
-  pinMode(PIN_R_TRAS,   OUTPUT);  digitalWrite(PIN_R_TRAS,   LOW);
+static void initMotors() {
+  pinMode(PIN_L_FORWARD,  OUTPUT);  digitalWrite(PIN_L_FORWARD,  LOW);
+  pinMode(PIN_L_BACKWARD, OUTPUT);  digitalWrite(PIN_L_BACKWARD, LOW);
+  pinMode(PIN_R_FORWARD,  OUTPUT);  digitalWrite(PIN_R_FORWARD,  LOW);
+  pinMode(PIN_R_BACKWARD, OUTPUT);  digitalWrite(PIN_R_BACKWARD, LOW);
 
-  bool okL = ledcAttachChannel(PIN_EN_L, PWM_FREQ, PWM_BITS, CANAL_PWM_L);
-  bool okR = ledcAttachChannel(PIN_EN_R, PWM_FREQ, PWM_BITS, CANAL_PWM_R);
-  Serial.printf("       PWM esq: pino %d -> canal %d [%s]\n",
-                PIN_EN_L, CANAL_PWM_L, okL ? "OK" : "FALHOU");
-  Serial.printf("       PWM dir: pino %d -> canal %d [%s]\n",
-                PIN_EN_R, CANAL_PWM_R, okR ? "OK" : "FALHOU");
+  ledcAttachChannel(PIN_EN_L, PWM_FREQ, PWM_BITS, PWM_CHANNEL_L);
+  ledcAttachChannel(PIN_EN_R, PWM_FREQ, PWM_BITS, PWM_CHANNEL_R);
   ledcWrite(PIN_EN_L, 0);
   ledcWrite(PIN_EN_R, 0);
-  marco("<<< motores prontos (parados)");
 }
 
-static void aplicaSentido(int pinFrente, int pinTras, int8_t sentido) {
-  if (sentido > 0)      { digitalWrite(pinTras, LOW);   digitalWrite(pinFrente, HIGH); }
-  else if (sentido < 0) { digitalWrite(pinFrente, LOW); digitalWrite(pinTras, HIGH);  }
-  else                  { digitalWrite(pinFrente, LOW); digitalWrite(pinTras, LOW);   }
+static void applyDirection(int pinForward, int pinBackward, int8_t dir) {
+  if (dir > 0)      { digitalWrite(pinBackward, LOW); digitalWrite(pinForward, HIGH); }
+  else if (dir < 0) { digitalWrite(pinForward, LOW);  digitalWrite(pinBackward, HIGH); }
+  else              { digitalWrite(pinForward, LOW);  digitalWrite(pinBackward, LOW); }
 }
 
-static void pararImediato() {
-  dutyAlvoL = dutyAlvoR = 0;
-  dutyAtualL = dutyAtualR = 0;
+static void stopNow() {
+  targetDutyL = targetDutyR = 0;
+  dutyL = dutyR = 0;
   ledcWrite(PIN_EN_L, 0);
   ledcWrite(PIN_EN_R, 0);
-  sentidoL = sentidoR = 0;
-  aplicaSentido(PIN_L_FRENTE, PIN_L_TRAS, 0);
-  aplicaSentido(PIN_R_FRENTE, PIN_R_TRAS, 0);
-  comandoAtual = "parar";
+  dirL = dirR = 0;
+  applyDirection(PIN_L_FORWARD, PIN_L_BACKWARD, 0);
+  applyDirection(PIN_R_FORWARD, PIN_R_BACKWARD, 0);
+  currentCommand = "stop";
 }
 
-static void defineMovimento(int8_t novoL, int8_t novoR, const char* nome) {
-  bool inverteu = (novoL != 0 && sentidoL != 0 && novoL != sentidoL) ||
-                  (novoR != 0 && sentidoR != 0 && novoR != sentidoR);
-  if (inverteu) {
+static void setMotion(int8_t newL, int8_t newR, const char* name) {
+  // A direction reversal cuts the PWM and waits before switching the H-bridge
+  bool reversed = (newL != 0 && dirL != 0 && newL != dirL) ||
+                  (newR != 0 && dirR != 0 && newR != dirR);
+  if (reversed) {
     ledcWrite(PIN_EN_L, 0);
     ledcWrite(PIN_EN_R, 0);
-    dutyAtualL = dutyAtualR = 0;
+    dutyL = dutyR = 0;
     delay(DEADTIME_MS);
   }
-  sentidoL = novoL;
-  sentidoR = novoR;
-  aplicaSentido(PIN_L_FRENTE, PIN_L_TRAS, sentidoL);
-  aplicaSentido(PIN_R_FRENTE, PIN_R_TRAS, sentidoR);
-  dutyAlvoL = (sentidoL == 0) ? 0 : max(velocidade, (uint8_t)VEL_MINIMA);
-  dutyAlvoR = (sentidoR == 0) ? 0 : max(velocidade, (uint8_t)VEL_MINIMA);
-  comandoAtual  = nome;
-  ultimoComando = millis();
+  dirL = newL;
+  dirR = newR;
+  applyDirection(PIN_L_FORWARD, PIN_L_BACKWARD, dirL);
+  applyDirection(PIN_R_FORWARD, PIN_R_BACKWARD, dirR);
+  targetDutyL = (dirL == 0) ? 0 : max(speed, (uint8_t)MIN_SPEED);
+  targetDutyR = (dirR == 0) ? 0 : max(speed, (uint8_t)MIN_SPEED);
+  currentCommand  = name;
+  lastCommandTime = millis();
 }
 
-static void atualizaRampa() {
-  uint32_t agora = millis();
-  if (agora - ultimaRampa < RAMPA_MS) return;
-  ultimaRampa = agora;
-  bool mudou = false;
+static void updateMotorRamp() {
+  uint32_t now = millis();
+  if (now - lastRampTime < RAMP_INTERVAL_MS) return;
+  lastRampTime = now;
+  bool changed = false;
 
-  if (dutyAtualL != dutyAlvoL) {
-    dutyAtualL = (dutyAtualL < dutyAlvoL)
-               ? min((int)dutyAlvoL, (int)dutyAtualL + RAMPA_PASSO)
-               : max((int)dutyAlvoL, (int)dutyAtualL - RAMPA_PASSO);
-    ledcWrite(PIN_EN_L, dutyAtualL);
-    mudou = true;
+  if (dutyL != targetDutyL) {
+    dutyL = (dutyL < targetDutyL)
+          ? min((int)targetDutyL, (int)dutyL + RAMP_STEP)
+          : max((int)targetDutyL, (int)dutyL - RAMP_STEP);
+    ledcWrite(PIN_EN_L, dutyL);
+    changed = true;
   }
-  if (dutyAtualR != dutyAlvoR) {
-    dutyAtualR = (dutyAtualR < dutyAlvoR)
-               ? min((int)dutyAlvoR, (int)dutyAtualR + RAMPA_PASSO)
-               : max((int)dutyAlvoR, (int)dutyAtualR - RAMPA_PASSO);
-    ledcWrite(PIN_EN_R, dutyAtualR);
-    mudou = true;
+  if (dutyR != targetDutyR) {
+    dutyR = (dutyR < targetDutyR)
+          ? min((int)targetDutyR, (int)dutyR + RAMP_STEP)
+          : max((int)targetDutyR, (int)dutyR - RAMP_STEP);
+    ledcWrite(PIN_EN_R, dutyR);
+    changed = true;
   }
-  if (mudou && dutyAtualL == 0 && dutyAtualR == 0 && dutyAlvoL == 0 && dutyAlvoR == 0) {
-    aplicaSentido(PIN_L_FRENTE, PIN_L_TRAS, 0);
-    aplicaSentido(PIN_R_FRENTE, PIN_R_TRAS, 0);
-    sentidoL = sentidoR = 0;
+  // Release the H-bridge once both motors have ramped down to zero
+  if (changed && dutyL == 0 && dutyR == 0 && targetDutyL == 0 && targetDutyR == 0) {
+    applyDirection(PIN_L_FORWARD, PIN_L_BACKWARD, 0);
+    applyDirection(PIN_R_FORWARD, PIN_R_BACKWARD, 0);
+    dirL = dirR = 0;
   }
 }
 
-/* --------------------------- Camera ------------------------------- */
+/* ------------------------------ Camera ----------------------------- */
 
-static bool iniciaCamera() {
+static bool initCamera() {
   camera_config_t config = {};
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer   = LEDC_TIMER_0;
@@ -268,150 +241,121 @@ static bool iniciaCamera() {
     config.fb_location = CAMERA_FB_IN_DRAM;
     config.fb_count    = 1;
     config.grab_mode   = CAMERA_GRAB_WHEN_EMPTY;
-    Serial.println("       !! PSRAM Disabled no Tools. Habilite.");
+    Serial.println("PSRAM not found, check the board settings");
   }
 
-  marco(">>> esp_camera_init()");
   esp_err_t err = esp_camera_init(&config);
-  marco("<<< esp_camera_init()");
   if (err != ESP_OK) {
-    Serial.printf("!! esp_camera_init FALHOU: 0x%x (%s)\n", err, esp_err_to_name(err));
+    Serial.printf("Camera init failed: 0x%x (%s)\n", err, esp_err_to_name(err));
     return false;
   }
+  // Rotate the image 180 degrees to match the camera mounting
   sensor_t* s = esp_camera_sensor_get();
   if (s) { s->set_vflip(s, 1); s->set_hmirror(s, 1); }
   return true;
 }
 
-/* ------------------------ Handlers HTTP --------------------------- */
+/* -------------------------- HTTP handlers -------------------------- */
 
-static bool leParam(httpd_req_t* req, const char* chave, char* saida, size_t tam) {
+static bool readParam(httpd_req_t* req, const char* key, char* out, size_t size) {
   size_t qlen = httpd_req_get_url_query_len(req) + 1;
   if (qlen <= 1) return false;
   char* query = (char*)malloc(qlen);
   if (!query) return false;
-  bool achou = false;
+  bool found = false;
   if (httpd_req_get_url_query_str(req, query, qlen) == ESP_OK)
-    achou = (httpd_query_key_value(query, chave, saida, tam) == ESP_OK);
+    found = (httpd_query_key_value(query, key, out, size) == ESP_OK);
   free(query);
-  return achou;
+  return found;
 }
 
-static void respondeEstado(httpd_req_t* req) {
-  char resposta[200];
-  snprintf(resposta, sizeof(resposta),
-           "{\"cmd\":\"%s\",\"vel\":%u,\"dutyL\":%u,\"dutyR\":%u,"
-           "\"farol\":%u,\"heap\":%u}",
-           comandoAtual, velocidade, dutyAtualL, dutyAtualR,
-           farolAtual, (unsigned)ESP.getFreeHeap());
+static void sendStatus(httpd_req_t* req) {
+  char body[200];
+  snprintf(body, sizeof(body),
+           "{\"cmd\":\"%s\",\"speed\":%u,\"dutyL\":%u,\"dutyR\":%u,"
+           "\"light\":%u,\"heap\":%u}",
+           currentCommand, speed, dutyL, dutyR,
+           light, (unsigned)ESP.getFreeHeap());
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-  httpd_resp_send(req, resposta, HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
 
-static esp_err_t handlerCmd(httpd_req_t* req) {
-  char valor[16];
+static esp_err_t cmdHandler(httpd_req_t* req) {
+  char value[16];
 
-  if (leParam(req, "vel", valor, sizeof(valor))) {
-    velocidade = (uint8_t)constrain(atoi(valor), 0, 255);
-    if (dutyAlvoL) dutyAlvoL = max(velocidade, (uint8_t)VEL_MINIMA);
-    if (dutyAlvoR) dutyAlvoR = max(velocidade, (uint8_t)VEL_MINIMA);
+  if (readParam(req, "speed", value, sizeof(value))) {
+    speed = (uint8_t)constrain(atoi(value), 0, 255);
+    if (targetDutyL) targetDutyL = max(speed, (uint8_t)MIN_SPEED);
+    if (targetDutyR) targetDutyR = max(speed, (uint8_t)MIN_SPEED);
   }
 
-  if (leParam(req, "dir", valor, sizeof(valor))) {
-    if      (!strcmp(valor, "frente")) defineMovimento( 1,  1, "frente");
-    else if (!strcmp(valor, "tras"))   defineMovimento(-1, -1, "tras");
-    else if (!strcmp(valor, "esq"))    defineMovimento(GIRO_NO_EIXO ? -1 : 0,  1, "esq");
-    else if (!strcmp(valor, "dir"))    defineMovimento( 1, GIRO_NO_EIXO ? -1 : 0, "dir");
-    else if (!strcmp(valor, "parar"))  pararImediato();
-    else { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "dir invalida"); return ESP_FAIL; }
+  if (readParam(req, "dir", value, sizeof(value))) {
+    if      (!strcmp(value, "forward"))  setMotion( 1,  1, "forward");
+    else if (!strcmp(value, "backward")) setMotion(-1, -1, "backward");
+    else if (!strcmp(value, "left"))     setMotion(SPIN_IN_PLACE ? -1 : 0,  1, "left");
+    else if (!strcmp(value, "right"))    setMotion( 1, SPIN_IN_PLACE ? -1 : 0, "right");
+    else if (!strcmp(value, "stop"))     stopNow();
+    else { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid dir"); return ESP_FAIL; }
   }
 
-  ultimoComando = millis();
-  respondeEstado(req);
+  lastCommandTime = millis();
+  sendStatus(req);
   return ESP_OK;
 }
 
-static esp_err_t handlerFarol(httpd_req_t* req) {
-  char valor[16];
-  if (leParam(req, "nivel", valor, sizeof(valor))) {
-    defineFarol(atoi(valor));
-    Serial.printf("       farol -> %u (teto %d)\n", farolAlvo, FAROL_MAX);
-  } else if (leParam(req, "on", valor, sizeof(valor))) {
-    defineFarol(atoi(valor) ? FAROL_MAX : 0);
+static esp_err_t lightHandler(httpd_req_t* req) {
+  char value[16];
+  if (readParam(req, "level", value, sizeof(value))) {
+    setLight(atoi(value));
+  } else if (readParam(req, "on", value, sizeof(value))) {
+    setLight(atoi(value) ? LIGHT_MAX : 0);
   }
-  respondeEstado(req);
+  sendStatus(req);
   return ESP_OK;
 }
 
-static esp_err_t handlerFoto(httpd_req_t* req) {
+static esp_err_t photoHandler(httpd_req_t* req) {
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) { httpd_resp_send_500(req); return ESP_FAIL; }
   httpd_resp_set_type(req, "image/jpeg");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-  esp_err_t r = httpd_resp_send(req, (const char*)fb->buf, fb->len);
+  esp_err_t res = httpd_resp_send(req, (const char*)fb->buf, fb->len);
   esp_camera_fb_return(fb);
-  return r;
+  return res;
 }
 
-static esp_err_t handlerStream(httpd_req_t* req) {
-  char cabecalho[64];
+static esp_err_t streamHandler(httpd_req_t* req) {
+  char header[64];
   esp_err_t res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
   if (res != ESP_OK) return res;
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
 
-  streamAtivo = true;
-  framesNoStream = 0;
-  uint32_t bytesAcumulados = 0;
-  int64_t tJanela = esp_timer_get_time();
-  Serial.println(">>> stream INICIADO");
-
   while (true) {
-    int64_t tFrame = esp_timer_get_time();
+    int64_t frameStart = esp_timer_get_time();
     camera_fb_t* fb = esp_camera_fb_get();
-    if (!fb) { Serial.println("!! stream: fb_get NULL"); res = ESP_FAIL; break; }
+    if (!fb) { res = ESP_FAIL; break; }
 
     size_t len = fb->len;
-    snprintf(cabecalho, sizeof(cabecalho), STREAM_PARTE, (unsigned)len);
+    snprintf(header, sizeof(header), STREAM_PART, (unsigned)len);
     res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
-    if (res == ESP_OK) res = httpd_resp_send_chunk(req, cabecalho, strlen(cabecalho));
+    if (res == ESP_OK) res = httpd_resp_send_chunk(req, header, strlen(header));
     if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char*)fb->buf, len);
     esp_camera_fb_return(fb);
     if (res != ESP_OK) break;
 
-    framesNoStream++;
-    bytesAcumulados += len;
-
-    if (framesNoStream % STATS_A_CADA_N_FRAMES == 0) {
-      int64_t agora = esp_timer_get_time();
-      float seg = (agora - tJanela) / 1000000.0f;
-      Serial.printf("    stream: %lu fr | %.1f fps | %.1f KB/s | cmd %-6s | duty %3u/%3u | farol %3u | heap %u B\n",
-                    (unsigned long)framesNoStream, STATS_A_CADA_N_FRAMES / seg,
-                    (bytesAcumulados / 1024.0f) / seg, comandoAtual,
-                    dutyAtualL, dutyAtualR, farolAtual, (unsigned)ESP.getFreeHeap());
-      bytesAcumulados = 0;
-      tJanela = agora;
-    }
-
-#if STREAM_INTERVALO_MS > 0
-    int32_t gasto = (int32_t)((esp_timer_get_time() - tFrame) / 1000);
-    int32_t sobra = STREAM_INTERVALO_MS - gasto;
-    vTaskDelay(pdMS_TO_TICKS(sobra > 0 ? sobra : 1));
-#else
-    vTaskDelay(pdMS_TO_TICKS(1));
-#endif
+    // Hold a fixed frame interval to keep the Wi-Fi load predictable
+    int32_t elapsed = (int32_t)((esp_timer_get_time() - frameStart) / 1000);
+    int32_t remaining = STREAM_INTERVAL_MS - elapsed;
+    vTaskDelay(pdMS_TO_TICKS(remaining > 0 ? remaining : 1));
   }
-
-  streamAtivo = false;
-  Serial.printf("<<< stream ENCERRADO apos %lu frames | heap %u B\n",
-                (unsigned long)framesNoStream, (unsigned)ESP.getFreeHeap());
   return res;
 }
 
-static esp_err_t handlerRaiz(httpd_req_t* req) {
-  static const char pagina[] = R"HTML(<!DOCTYPE html><html><head>
+static esp_err_t rootHandler(httpd_req_t* req) {
+  static const char page[] = R"HTML(<!DOCTYPE html><html><head>
 <meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>Robo - Etapa 5</title><style>
+<title>ESP32-CAM Robot</title><style>
 body{font-family:sans-serif;background:#111;color:#eee;text-align:center;margin:0;padding:10px}
 img{max-width:100%;border:1px solid #444;min-height:100px}
 button{padding:16px;font-size:15px;margin:3px;border:0;border-radius:8px;
@@ -421,162 +365,132 @@ button:active{background:#4a7dcf}
 #st{font-family:monospace;font-size:12px;color:#8a8;word-break:break-all}
 label{font-size:14px}
 </style></head><body>
-<h3>Etapa 5 - camera + motores + farol</h3>
+<h3>ESP32-CAM Robot</h3>
 <img id='v'>
 <p>
 <button onclick="v.src='http://'+location.hostname+':81/stream'">Stream ON</button>
 <button onclick="v.src=''">Stream OFF</button>
-<button id='fa' style='background:#8f7a2a'>Farol</button>
+<button id='lt' style='background:#8f7a2a'>Light</button>
 </p>
 <div class='grid'>
 <div></div><button id='f'>&#9650;</button><div></div>
-<button id='e'>&#9664;</button><button id='p' style='background:#8f2a2a'>STOP</button><button id='d'>&#9654;</button>
-<div></div><button id='t'>&#9660;</button><div></div>
+<button id='l'>&#9664;</button><button id='s' style='background:#8f2a2a'>STOP</button><button id='r'>&#9654;</button>
+<div></div><button id='b'>&#9660;</button><div></div>
 </div>
-<p><label>Velocidade: <span id='vv'>180</span></label><br>
-<input type='range' min='80' max='255' value='180' id='sl' style='width:80%'></p>
-<p><label>Farol: <span id='fv'>0</span></label><br>
-<input type='range' min='0' max='80' value='0' id='fs' style='width:80%'></p>
+<p><label>Speed: <span id='spv'>180</span></label><br>
+<input type='range' min='80' max='255' value='180' id='sp' style='width:80%'></p>
+<p><label>Light: <span id='lv'>0</span></label><br>
+<input type='range' min='0' max='80' value='0' id='ls' style='width:80%'></p>
 <div id='st'>--</div>
 <script>
 const v=document.getElementById('v');
-let rep=null, farolLigado=false;
-function mostra(j){st.textContent=JSON.stringify(j);}
-function envia(d){fetch('/cmd?dir='+d+'&vel='+sl.value)
-  .then(r=>r.json()).then(mostra).catch(()=>{});}
-function farol(n){fetch('/farol?nivel='+n)
-  .then(r=>r.json()).then(mostra).catch(()=>{});}
-function segura(id,d){const b=document.getElementById(id);
-  const ini=e=>{e.preventDefault();envia(d);clearInterval(rep);
-                rep=setInterval(()=>envia(d),300);};
-  const fim=e=>{e.preventDefault();clearInterval(rep);envia('parar');};
-  b.addEventListener('pointerdown',ini);
-  b.addEventListener('pointerup',fim);
-  b.addEventListener('pointerleave',fim);
-  b.addEventListener('pointercancel',fim);}
-segura('f','frente');segura('t','tras');segura('e','esq');segura('d','dir');
-document.getElementById('p').addEventListener('pointerdown',e=>{
-  e.preventDefault();clearInterval(rep);envia('parar');});
-document.getElementById('fa').addEventListener('click',()=>{
-  farolLigado=!farolLigado;
-  const n=farolLigado?fs.max:0;
-  fs.value=n;fv.textContent=n;farol(n);});
-sl.addEventListener('input',()=>{vv.textContent=sl.value;});
-fs.addEventListener('change',()=>{fv.textContent=fs.value;farol(fs.value);});
-fs.addEventListener('input',()=>{fv.textContent=fs.value;});
+let repeat=null, lightOn=false;
+function show(j){st.textContent=JSON.stringify(j);}
+function send(d){fetch('/cmd?dir='+d+'&speed='+sp.value)
+  .then(r=>r.json()).then(show).catch(()=>{});}
+function setLight(n){fetch('/light?level='+n)
+  .then(r=>r.json()).then(show).catch(()=>{});}
+function hold(id,d){const b=document.getElementById(id);
+  const start=e=>{e.preventDefault();send(d);clearInterval(repeat);
+                  repeat=setInterval(()=>send(d),300);};
+  const end=e=>{e.preventDefault();clearInterval(repeat);send('stop');};
+  b.addEventListener('pointerdown',start);
+  b.addEventListener('pointerup',end);
+  b.addEventListener('pointerleave',end);
+  b.addEventListener('pointercancel',end);}
+hold('f','forward');hold('b','backward');hold('l','left');hold('r','right');
+document.getElementById('s').addEventListener('pointerdown',e=>{
+  e.preventDefault();clearInterval(repeat);send('stop');});
+document.getElementById('lt').addEventListener('click',()=>{
+  lightOn=!lightOn;
+  const n=lightOn?ls.max:0;
+  ls.value=n;lv.textContent=n;setLight(n);});
+sp.addEventListener('input',()=>{spv.textContent=sp.value;});
+ls.addEventListener('change',()=>{lv.textContent=ls.value;setLight(ls.value);});
+ls.addEventListener('input',()=>{lv.textContent=ls.value;});
 </script></body></html>)HTML";
   httpd_resp_set_type(req, "text/html");
-  return httpd_resp_send(req, pagina, HTTPD_RESP_USE_STRLEN);
+  return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
 
-/* ------------------------ Servidores HTTP ------------------------- */
+/* --------------------------- HTTP servers -------------------------- */
 
-static bool iniciaServidores() {
-  httpd_config_t cfgWeb = HTTPD_DEFAULT_CONFIG();
-  cfgWeb.server_port      = 80;
-  cfgWeb.ctrl_port        = 32768;
-  cfgWeb.max_uri_handlers = 8;
-  cfgWeb.stack_size       = 8192;
-  cfgWeb.lru_purge_enable = true;
+static bool startServers() {
+  // Control and stream run on separate servers so that a blocking stream
+  // does not delay motor commands
+  httpd_config_t webCfg = HTTPD_DEFAULT_CONFIG();
+  webCfg.server_port      = 80;
+  webCfg.ctrl_port        = 32768;
+  webCfg.max_uri_handlers = 8;
+  webCfg.stack_size       = 8192;
+  webCfg.lru_purge_enable = true;
 
-  marco(">>> httpd porta 80");
-  if (httpd_start(&servidorWeb, &cfgWeb) != ESP_OK) {
-    Serial.println("!! httpd_start(80) FALHOU");
+  if (httpd_start(&webServer, &webCfg) != ESP_OK) {
+    Serial.println("Failed to start server on port 80");
     return false;
   }
-  httpd_uri_t uriRaiz  = { "/",      HTTP_GET, handlerRaiz,  NULL };
-  httpd_uri_t uriFoto  = { "/foto",  HTTP_GET, handlerFoto,  NULL };
-  httpd_uri_t uriCmd   = { "/cmd",   HTTP_GET, handlerCmd,   NULL };
-  httpd_uri_t uriFarol = { "/farol", HTTP_GET, handlerFarol, NULL };
-  httpd_register_uri_handler(servidorWeb, &uriRaiz);
-  httpd_register_uri_handler(servidorWeb, &uriFoto);
-  httpd_register_uri_handler(servidorWeb, &uriCmd);
-  httpd_register_uri_handler(servidorWeb, &uriFarol);
+  httpd_uri_t rootUri  = { "/",      HTTP_GET, rootHandler,  NULL };
+  httpd_uri_t photoUri = { "/photo", HTTP_GET, photoHandler, NULL };
+  httpd_uri_t cmdUri   = { "/cmd",   HTTP_GET, cmdHandler,   NULL };
+  httpd_uri_t lightUri = { "/light", HTTP_GET, lightHandler, NULL };
+  httpd_register_uri_handler(webServer, &rootUri);
+  httpd_register_uri_handler(webServer, &photoUri);
+  httpd_register_uri_handler(webServer, &cmdUri);
+  httpd_register_uri_handler(webServer, &lightUri);
 
-  httpd_config_t cfgStream = HTTPD_DEFAULT_CONFIG();
-  cfgStream.server_port      = 81;
-  cfgStream.ctrl_port        = 32769;
-  cfgStream.max_uri_handlers = 2;
-  cfgStream.stack_size       = 8192;
-  cfgStream.lru_purge_enable = true;
+  httpd_config_t streamCfg = HTTPD_DEFAULT_CONFIG();
+  streamCfg.server_port      = 81;
+  streamCfg.ctrl_port        = 32769;
+  streamCfg.max_uri_handlers = 2;
+  streamCfg.stack_size       = 8192;
+  streamCfg.lru_purge_enable = true;
 
-  marco(">>> httpd porta 81");
-  if (httpd_start(&servidorStream, &cfgStream) != ESP_OK) {
-    Serial.println("!! httpd_start(81) FALHOU");
+  if (httpd_start(&streamServer, &streamCfg) != ESP_OK) {
+    Serial.println("Failed to start server on port 81");
     return false;
   }
-  httpd_uri_t uriStream = { "/stream", HTTP_GET, handlerStream, NULL };
-  httpd_register_uri_handler(servidorStream, &uriStream);
-
-  marco("<<< servidores no ar");
+  httpd_uri_t streamUri = { "/stream", HTTP_GET, streamHandler, NULL };
+  httpd_register_uri_handler(streamServer, &streamUri);
   return true;
 }
 
-/* ---------------------------- WiFi -------------------------------- */
+/* ------------------------------ Wi-Fi ------------------------------ */
 
-static bool iniciaWiFi() {
-  marco("chamando WiFi.mode()");
-  if (!WiFi.mode(WIFI_AP)) Serial.println("!! FALHA em WiFi.mode()");
+static bool startWiFi() {
+  WiFi.mode(WIFI_AP);
   delay(100);
   WiFi.setTxPower(TX_POWER);
-  Serial.printf("       TX power lida de volta: %d (0,25 dBm)\n", (int)WiFi.getTxPower());
-  marco(">>> softAP()");
-  bool ok = WiFi.softAP(AP_SSID, AP_PASS, AP_CHANNEL, 0, AP_MAX_CONN);
-  marco("<<< softAP()");
-  return ok;
+  return WiFi.softAP(AP_SSID, AP_PASS, AP_CHANNEL, 0, AP_MAX_CONN);
 }
 
-/* ---------------------------- Setup ------------------------------- */
+/* ------------------------------ Main ------------------------------- */
 
 void setup() {
   Serial.begin(115200);
   delay(1500);
-  Serial.setDebugOutput(true);
 
-  Serial.println();
-  Serial.println("========================================================");
-  Serial.println("  ETAPA 5 - CAMERA + MOTORES + FAROL");
-  Serial.println("========================================================");
-  Serial.printf("Ultimo reset : %s\n", motivoReset(esp_reset_reason()));
-  Serial.printf("PSRAM        : %s\n", psramFound() ? "DETECTADA" : "NAO detectada");
-  Serial.println("--------------------------------------------------------");
+  initMotors();
+  initLight();
 
-  iniciaMotores();
-  iniciaFarol();
+  // Wi-Fi must start before the camera
+  if (!startWiFi())   { Serial.println("Wi-Fi init failed"); return; }
+  if (!initCamera())  return;
+  if (!startServers()) return;
 
-  /* ORDEM VALIDADA: WiFi ANTES da camera. Nao inverta. */
-  if (!iniciaWiFi())   { Serial.println("!! WiFi falhou.");   return; }
-  if (!iniciaCamera()) { Serial.println("!! Camera falhou."); return; }
-  if (!iniciaServidores()) return;
+  lastCommandTime = millis();
 
-  ultimoComando = millis();
-
-  Serial.println("--------------------------------------------------------");
-  Serial.print ("Pagina : http://"); Serial.println(WiFi.softAPIP());
-  Serial.print ("Stream : http://"); Serial.print(WiFi.softAPIP());
+  Serial.print("Control page : http://"); Serial.println(WiFi.softAPIP());
+  Serial.print("Stream       : http://"); Serial.print(WiFi.softAPIP());
   Serial.println(":81/stream");
-  Serial.println("SETUP CONCLUIDO.");
-  Serial.println();
 }
 
 void loop() {
-  atualizaRampa();
-  atualizaRampaFarol();
+  updateMotorRamp();
+  updateLightRamp();
 
-  if ((dutyAlvoL || dutyAlvoR) &&
-      (millis() - ultimoComando > TIMEOUT_COMANDO_MS)) {
-    Serial.println("!! FAILSAFE: sem comando, parando motores");
-    pararImediato();
+  // Failsafe: stop the motors if the host stops sending commands
+  if ((targetDutyL || targetDutyR) &&
+      (millis() - lastCommandTime > COMMAND_TIMEOUT_MS)) {
+    stopNow();
   }
-
-  uint32_t agora = millis();
-  if (agora - heartbeatAnterior < HEARTBEAT_MS) return;
-  heartbeatAnterior = agora;
-  contadorHeartbeat++;
-
-  Serial.printf("vivo #%-4lu | %4lu s | clientes %d | stream %s | cmd %-6s | duty %3u/%3u | farol %3u | heap %6u B | menor %6u B\n",
-                (unsigned long)contadorHeartbeat, (unsigned long)(agora / 1000),
-                WiFi.softAPgetStationNum(), streamAtivo ? "ON " : "OFF",
-                comandoAtual, dutyAtualL, dutyAtualR, farolAtual,
-                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
 }

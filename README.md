@@ -1,67 +1,156 @@
-# robocar-sinalizacao
+# Brazilian Traffic Sign Detection on a Low-Cost Mobile Robot
 
-Detecção de placas de trânsito para navegação autônoma de um robô móvel. Um robô com ESP32-CAM transmite vídeo por Wi-Fi a um host externo, que executa a detecção e devolve comandos de manobra.
+Code and data for the paper *Can You See the Signs? Cross-Environment Brazilian Traffic Sign Detection with YOLO on a Low-Cost Mobile Robot*.
 
-Projeto final da disciplina Tópicos Avançados de IA (UFABC).
+A four-wheel robot with an ESP32-CAM streams video over Wi-Fi to an external host. The host runs a YOLO detector on each frame and sends motion commands back to the robot. The repository contains the robot firmware, the host scripts, the training and analysis notebooks, the trained models and the data recorded in 60 runs of the robot.
 
-## Estrutura
-`host/` executa em tempo real, com o robô ligado
-`firmware/` sketch da ESP32-CAM (captura, Wi-Fi e motores)
-`training/` notebooks de treino (Colab com GPU) e artefatos das execuções
-`analise/` processamento dos experimentos e comparação de latência
-`models/` pesos treinados
-`data/` referências, execuções com o robô e vídeo da competição
+## Repository structure
 
-
-## Modelos
-
-| Arquivo | Descrição |
+| Folder | Contents |
 |---|---|
-| `models/yolov11n.pt` | YOLO11n, usado nos experimentos com o robô |
-| `models/yolov8n.pt` | YOLOv8n, treinado para comparação entre gerações |
-| `models/mlp.keras` | MLP do baseline de duas etapas |
-| `models/cnn.keras` | CNN do baseline de duas etapas |
+| `firmware/` | ESP32-CAM firmware (video stream, Wi-Fi access point and motor control) |
+| `host/` | Scripts that run on the inference host, for image capture and closed-loop runs |
+| `training/` | Training notebooks (Google Colab) and the results of each training run |
+| `analysis/` | Notebook that reproduces the operation results and the inference cost comparison |
+| `models/` | Trained weights |
+| `data/` | Reference sign images, robot runs and reference video |
 
-As seis classes do projeto: R-25a (virar à esquerda), R-25b (virar à direita), R-26 (seguir em frente), R-3 (sentido proibido), R-4a (proibido virar à esquerda) e R-4b (proibido virar à direita).
+## Signs
 
-## Dados
+| Code | Sign | Class label |
+|---|---|---|
+| R-25a | Turn left | `R-25a_esquerda` |
+| R-25b | Turn right | `R-25b_direita` |
+| R-26 | Go straight | `R-26_frente` |
+| R-3 | No entry | `R-3_sentido-proibido` |
+| R-4a | No left turn | `R-4a_proibido-esquerda` |
+| R-4b | No right turn | `R-4b_proibido-direita` |
 
-O conjunto próprio, com 1.232 imagens capturadas pela ESP32-CAM em cinco sessões, está hospedado no Roboflow e é baixado pelos notebooks de treino via API. Não é versionado aqui. Disponível no link: https://universe.roboflow.com/vitor-chagas/robocar-dataset-c
+Class labels keep the Portuguese names used in the dataset and in the recorded data.
 
-`data/referencias/` contém as seis imagens de referência que geram o conjunto sintético do baseline.
+## Dataset
 
-`data/experimentos/` contém as 60 execuções com o robô, organizadas por classe. Cada execução tem `frames.csv` (uma linha por quadro, com detecção e tempos por etapa), `meta.json` (veredito da execução) e `video.mp4`.
+The dataset has 1,232 images captured by the robot's ESP32-CAM in five sessions, each in a different environment. Sessions 1 to 3 are used for training, session 4 for validation and session 5 for testing. It is hosted on Roboflow Universe under the CC BY 4.0 license and is downloaded by the notebooks through the Roboflow API.
 
-`data/video_robocar.mp4` é o vídeo gravado na competição, usado na comparação de latência entre modelos.
+https://universe.roboflow.com/vitor-chagas/robocar-dataset-c (version 2)
 
-## Reproduzir
+Downloading requires a Roboflow API key, which any free account provides. The notebooks ask for the key when they run.
 
-Os notebooks rodam no Google Colab com GPU. Os scripts em `host/` rodam localmente, com o robô ligado e conectado à rede Wi-Fi criada pela ESP32-CAM.
+## Models
 
-### 1. Treinar os detectores
+| File | Description |
+|---|---|
+| `models/yolov11n.pt` | YOLO11n, used in the robot runs |
+| `models/yolov8n.pt` | YOLOv8n, trained with the same configuration for comparison |
+| `models/mlp.keras` | MLP classifier of the Hough baseline |
+| `models/cnn.keras` | CNN classifier of the Hough baseline |
 
-Abra `training/treino_YOLO_v11n.ipynb` no Colab, ative a GPU e execute de cima a baixo. O notebook baixa o conjunto de dados do Roboflow, treina o modelo, avalia sobre o conjunto de teste e gera o vídeo anotado. `training/treino_YOLO_v8n.ipynb` faz o mesmo com a geração anterior, sob configuração idêntica.
+## Reproducing the results
 
-Os artefatos de cada execução (`args.yaml`, `results.csv`, curvas e matrizes de confusão) estão em `training/resultados/`.
+The notebooks run on Google Colab with a GPU runtime. The analysis notebook also runs locally from the repository root.
 
-### 2. Treinar o baseline
+| Result in the paper | Source |
+|---|---|
+| Training of YOLO11n and YOLOv8n (Table II) | `training/train_yolo11n.ipynb`, `training/train_yolov8n.ipynb` |
+| Test set metrics and confusion matrix (Table III, Fig. 9) | `training/results/` |
+| Hough baseline | `training/baseline_hough_cnn.ipynb` |
+| Inference cost on the reference video (Table IV) | `analysis/results_analysis.ipynb`, section 3 |
+| Loop latency in operation (Table V) | `analysis/results_analysis.ipynb`, section 2.1 |
+| Detections in operation (Table VI) | `analysis/results_analysis.ipynb`, section 2.2 |
+| Bounding box widths (Fig. 10) | `analysis/results_analysis.ipynb`, section 2.3 |
 
-Abra `training/baseline_hough_cnn.ipynb` no Colab. Ele sintetiza o conjunto de treino a partir das seis imagens em `data/referencias/`, treina a MLP e a CNN, e exporta os pesos para `models/`.
+`training/results/` holds, for each detector, the training run (`A_v11n`, `A_v8n`), the evaluation on the test set (`A_val_test`) and the `data.yaml` that identifies the dataset version.
 
-### 3. Executar com o robô
+Inference times measured on a GPU vary slightly between runs, so section 3 of the analysis notebook gives values close to, but not identical to, those in Table IV.
 
-Grave `firmware/firmware-projeto-ia.ino` na ESP32-CAM. Ao ligar, a placa cria uma rede Wi-Fi própria; conecte o host a ela.
+## Running the robot
 
-`host/capture_image.py` consome o stream e grava quadros, usado para montar o conjunto de dados.
+### Hardware
 
-`host/live-test.py` executa o experimento em malha fechada: lê o stream, roda a detecção, decide a manobra e envia o comando. Cada execução grava `frames.csv`, `meta.json` e `video.mp4` em `data/experimentos/`. As constantes no topo do arquivo (IP do robô, modelo, limiar de disparo, velocidade) devem ser ajustadas antes de rodar.
+KUONGSHUN AD174 four-wheel kit with an ESP32-CAM (AI Thinker, OV3660 sensor), an L298N motor driver and two 18650 cells in series. The two motors on each side are driven together.
 
-### 4. Analisar os resultados
+| Function | ESP32-CAM GPIO |
+|---|---|
+| Left motors, forward | 15 |
+| Left motors, backward | 33 |
+| Right motors, forward | 13 |
+| Right motors, backward | 14 |
+| Left motors, enable (PWM) | 2 |
+| Right motors, enable (PWM) | 12 |
+| Light | 4 |
 
-Abra `analise/analise_resultados.ipynb`. A primeira seção lê `data/experimentos/` e reproduz as tabelas de decisão correta e de latência por etapa do relatório; roda em qualquer máquina, em segundos. A segunda executa os quatro modelos sobre `data/video_robocar.mp4` e mede o custo de inferência de cada um, exigindo GPU.
+### Firmware
 
-## Resultados
+Built with the Arduino IDE and the arduino-esp32 core 3.3.10, board "ESP32 Dev Module" with PSRAM enabled. At startup the board creates the Wi-Fi network `ROBOT-AP` and serves:
 
-- Detecção: mAP@0.5 de 0,9830 (YOLO11n) sobre conjunto de teste em ambiente não observado no treino
-- Latência de inferência: 15,5 ms (YOLO11n) contra 68,2 ms do baseline, em GPU T4
-- Sistema em operação: 4,4 decisões por segundo, com 50 de 60 execuções emitindo a decisão correta
+| Endpoint | Description |
+|---|---|
+| `http://192.168.4.1/` | Manual control page |
+| `http://192.168.4.1/cmd?dir=<forward,backward,left,right,stop>&speed=<0-255>` | Motion command |
+| `http://192.168.4.1/light?level=<0-80>` | Light |
+| `http://192.168.4.1/photo` | Single JPEG frame |
+| `http://192.168.4.1:81/stream` | MJPEG stream, 640 × 480 |
+
+The motors stop if no command arrives within 900 ms.
+
+### Host
+
+Requires Python with `ultralytics`, `opencv-python` and `requests`. Connect the host to `ROBOT-AP` and run the scripts from the repository root.
+
+- `host/capture_image.py` saves labeled frames from the stream, organized by session and class.
+- `host/live_test.py` runs the closed-loop experiment. For each run it saves `video.mp4`, `frames.csv` and `meta.json` to `data/experiments/<class>/runNN/`. The keys are listed at the top of the file.
+
+## Recorded data
+
+`data/experiments/` holds the 60 runs used in the paper, 10 per sign. Each run has
+
+- `frames.csv`, one row per loop iteration, with stage timings and the detection of that frame
+- `meta.json`, the run summary and settings
+- `video.mp4`, the annotated frames
+
+These runs were recorded with an earlier version of `host/live_test.py` that used Portuguese field names. The current version writes the English names below.
+
+**`frames.csv`**
+
+| Recorded name | Current name | Description |
+|---|---|---|
+| `frame_id` | `frame_id` | Iteration number within the run |
+| `t_rel_s` | `t_rel_s` | Time since the start of the run (s) |
+| `t_captura_ms` | `t_capture_ms` | Interval since the previous iteration, that is, the loop period (ms) |
+| `t_inferencia_ms` | `t_inference_ms` | Detector inference time (ms) |
+| `t_decisao_ms` | `t_decision_ms` | Decision logic time (ms) |
+| `t_comando_ms` | `t_command_ms` | Command dispatch time, empty when no command was sent (ms) |
+| `classe_detectada` | `detected_class` | Class of the most confident detection, empty if none |
+| `confianca` | `confidence` | Confidence of that detection |
+| `bbox_w`, `bbox_h` | `bbox_w`, `bbox_h` | Width and height of the detection (px) |
+| `estado` | `state` | State of the run |
+| `comando_enviado` | `command_sent` | Command sent in this iteration, empty if none |
+
+**`meta.json`**
+
+| Recorded name | Current name |
+|---|---|
+| `classe_esperada` | `expected_class` |
+| `comando_esperado` | `expected_command` |
+| `classe_detectada` | `detected_class` |
+| `confianca_decisao` | `decision_confidence` |
+| `comando_emitido` | `issued_command` |
+| `decisao_correta` | `correct_decision` |
+| `manobra_executada` | `maneuver_executed` |
+| `datahora` | `datetime` |
+| `duracao_corrida_s` | `run_duration_s` |
+| `modelo` | `model` |
+| `limiar_bbox_w` | `bbox_w_threshold` |
+| `duracao_acao_ms` | `action_duration_ms` |
+| `velocidade` | `speed` |
+
+`run`, `n_frames`, `conf_min` and `flip` keep the same name.
+
+**Values**
+
+| Field | Recorded values | Current values |
+|---|---|---|
+| state | `PROCURANDO`, `APROXIMANDO`, `AGINDO` | `SEARCHING`, `APPROACHING`, `ACTING` |
+| command | `frente`, `tras`, `esq`, `dir`, `parar` | `forward`, `backward`, `left`, `right`, `stop` |
+
+`data/reference_signs/` holds the six reference images used to generate the synthetic dataset of the Hough baseline. `data/reference_video.mp4` is the reference video, recorded in another environment with a different camera, used for the inference cost comparison.

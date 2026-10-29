@@ -1,10 +1,21 @@
-# host/main.py
-# Experimento de malha fechada: ESP32-CAM -> Wi-Fi -> host (YOLO) -> comando -> robo.
-# Um arquivo, um laco. Por corrida salva video.mp4, frames.csv e meta.json.
+"""
+Closed-loop experiment: ESP32-CAM -> Wi-Fi -> host (YOLO) -> command -> robot.
+
+Each run is saved to data/experiments/<class>/runNN/ as video.mp4 (annotated
+frames), frames.csv (per-frame timing and detection) and meta.json (run
+summary and settings).
+
+MANUAL state keys:
+  i/k/j/l = move | SPACE = stop | a/s/d/f/g/h = target class
+  ENTER = start run | q = quit
+VERDICT state keys:
+  y/n = maneuver executed or not (saves the run)
+"""
 
 import csv
 import json
 import time
+import threading
 from pathlib import Path
 from datetime import datetime
 
@@ -12,33 +23,33 @@ import cv2
 import requests
 from ultralytics import YOLO
 
-# ===================== CONFIGURACAO (ajuste aqui) =========================
+# ------------------------------ Settings ------------------------------
 
-IP_ROBO = "192.168.4.1"
-STREAM  = f"http://{IP_ROBO}:81/stream"
-URL_CMD = f"http://{IP_ROBO}/cmd"
+ROBOT_IP = "192.168.4.1"
+STREAM   = f"http://{ROBOT_IP}:81/stream"
+CMD_URL  = f"http://{ROBOT_IP}/cmd"
 
-MODELO   = "models/yolov11n.pt"
+MODEL    = "models/yolov11n.pt"
 CONF_MIN = 0.70
 
-# Calibrar em MANUAL: posicione o robo na distancia de virar e leia o
-# bbox_w impresso na tela.
-LIMIAR_BBOX_W = 90        # px
+# Bounding box width at which the robot acts. Calibrated in MANUAL state by
+# placing the robot at the turning distance and reading bbox_w on screen.
+BBOX_W_THRESHOLD = 90     # px
 
-VELOCIDADE        = 180
-TIMEOUT_CORRIDA_S = 10     # corrida sem decisao morre aqui
-REENVIO_MS        = 300    # firmware para sozinho apos 900 ms sem comando
-FLIP              = True   # mesmo espelhamento do coletar_imagens.py
-FPS_VIDEO         = 7
+SPEED          = 180
+RUN_TIMEOUT_S  = 10       # a run without a decision ends here
+RESEND_MS      = 300      # the firmware stops the motors after 900 ms without a command
+FLIP           = True     # same mirroring used in capture_image.py
+VIDEO_FPS      = 7
 
-# Quanto tempo cada acao dura, em ms. Cronometre e ajuste.
-DURACAO = {"esq": 800, "dir": 800, "tras": 1000, "frente": 1500}
+# Duration of each action, in ms
+ACTION_DURATION = {"left": 800, "right": 800, "backward": 1000, "forward": 1500}
 
-RAIZ = Path("data/experimentos")
+ROOT = Path("data/experiments")
 
-# ===================== TECLAS E MAPEAMENTOS ===============================
+# ------------------------- Keys and mappings --------------------------
 
-# Mesmo mapa do coletar_imagens.py
+# Same keys and labels as capture_image.py
 CLASSES = {
     ord("a"): "R-26_frente",
     ord("s"): "R-25b_direita",
@@ -48,339 +59,330 @@ CLASSES = {
     ord("h"): "R-4b_proibido-direita",
 }
 
-# Direcao manual, para posicionar o robo antes da largada
+# Manual driving, used to position the robot before each run
 MANUAL = {
-    ord("i"): "frente",
-    ord("k"): "tras",
-    ord("j"): "esq",
-    ord("l"): "dir",
-    ord(" "): "parar",
+    ord("i"): "forward",
+    ord("k"): "backward",
+    ord("j"): "left",
+    ord("l"): "right",
+    ord(" "): "stop",
 }
 
-# Nome da classe NO MODELO -> comando. Conferir contra os nomes do data.yaml.
-# R-4a proibe a esquerda, entao vira a direita; R-4b o inverso.
-NOME_MODELO = {
-    "R-25a": "esq",
-    "R-25b": "dir",
-    "R-26":  "frente",
-    "R-3":   "tras",
-    "R-4a":  "dir",
-    "R-4b":  "esq",
+# Model class name -> command.
+# R-4a prohibits turning left, so the robot turns right; R-4b the opposite.
+MODEL_CLASS_COMMAND = {
+    "R-25a": "left",
+    "R-25b": "right",
+    "R-26":  "forward",
+    "R-3":   "backward",
+    "R-4a":  "right",
+    "R-4b":  "left",
 }
 
-# Comando esperado por classe da pasta (para conferir a decisao sozinho)
-COMANDO_CORRETO = {
-    "R-26_frente":            "frente",
-    "R-25b_direita":          "dir",
-    "R-25a_esquerda":         "esq",
-    "R-3_sentido-proibido":   "tras",
-    "R-4a_proibido-esquerda": "dir",
-    "R-4b_proibido-direita":  "esq",
+# Expected command for each target class, used to score the decision
+EXPECTED_COMMAND = {
+    "R-26_frente":            "forward",
+    "R-25b_direita":          "right",
+    "R-25a_esquerda":         "left",
+    "R-3_sentido-proibido":   "backward",
+    "R-4a_proibido-esquerda": "right",
+    "R-4b_proibido-direita":  "left",
 }
 
-COLUNAS = ["frame_id", "t_rel_s", "t_captura_ms", "t_inferencia_ms",
-           "t_decisao_ms", "t_comando_ms", "classe_detectada", "confianca",
-           "bbox_w", "bbox_h", "estado", "comando_enviado"]
+COLUMNS = ["frame_id", "t_rel_s", "t_capture_ms", "t_inference_ms",
+           "t_decision_ms", "t_command_ms", "detected_class", "confidence",
+           "bbox_w", "bbox_h", "state", "command_sent"]
 
-# ===================== INICIALIZACAO ======================================
+# ------------------------------- Setup --------------------------------
 
-modelo = YOLO(MODELO)
+model = YOLO(MODEL)
 
-#cap = cv2.VideoCapture(STREAM)
-#cap.set(cv2.CAP_PROP_BUFFERSIZE,1)
-import threading
 
-class LeitorStream:
-    # Le o stream sem parar numa thread separada e guarda so o frame mais
-    # recente. O descarte do que ficou velho acontece por sobrescrita: nao
-    # existe fila para o laco principal consumir.
+class StreamReader:
+    # Reads the stream continuously in a background thread and keeps only the
+    # latest frame, so the main loop always processes the most recent image
+    # instead of a queue of old ones.
     def __init__(self, url):
         self.cap = cv2.VideoCapture(url)
         if not self.cap.isOpened():
-            raise SystemExit(f"Nao abriu o stream: {url}")
+            raise SystemExit(f"Could not open stream: {url}")
         self.frame = None
-        self.rodando = True
-        # daemon: thread que nao impede o programa de encerrar
+        self.running = True
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self):
-        while self.rodando:
+        while self.running:
             ok, f = self.cap.read()
             if ok:
-                self.frame = f    # atribuicao simples e atomica: dispensa lock
+                self.frame = f
 
     def read(self):
         f = self.frame
         return (f is not None), f
 
     def release(self):
-        self.rodando = False
+        self.running = False
         self.cap.release()
 
-cap = LeitorStream(STREAM)
 
+cap = StreamReader(STREAM)
 
-#if not cap.isOpened():
-#    raise SystemExit(f"Nao abriu o stream: {STREAM}")
+target_class = "R-25a_esquerda"
+state = "MANUAL"
 
-classe_alvo = "R-25a_esquerda"
-estado = "MANUAL"
-
-pasta = None
-nome_run = None
+folder = None
+run_name = None
 video = None
-linhas = []
+rows = []
 frame_id = 0
-t_ini = 0.0
-t_cap_anterior = None
-comando_ativo = None
-ultimo_envio = 0.0
-comando_emitido = None
-classe_decidida = None
-conf_decidida = None
-t_fim_acao = 0.0
-t_fim_corrida = None
+t_start = 0.0
+t_prev_capture = None
+active_command = None
+last_send = 0.0
+issued_command = None
+decided_class = None
+decided_conf = None
+t_action_end = 0.0
+t_run_end = None
 
-print("MANUAL: i/k/j/l = mover | ESPACO = parar")
-print("classe: a=R-26  s=R-25b  d=R-25a  f=R-3  g=R-4a  h=R-4b")
-print("ENTER = largar | s/n = veredito no fim | q = sair")
+print("MANUAL: i/k/j/l = move | SPACE = stop")
+print("class: a=R-26  s=R-25b  d=R-25a  f=R-3  g=R-4a  h=R-4b")
+print("ENTER = start run | y/n = verdict at the end | q = quit")
 
-# ===================== LACO PRINCIPAL =====================================
+# ----------------------------- Main loop ------------------------------
 
 while True:
     ok, frame = cap.read()
     if not ok:
         continue
-    t_cap = time.perf_counter()
+    t_capture = time.perf_counter()
     if FLIP:
         frame = cv2.flip(frame, 1)
 
-    # (1) captura + transmissao: intervalo entre frames que chegaram.
-    # Agregado de proposito: separar exigiria sincronizar o relogio da ESP32.
-    t_captura_ms = None
-    if t_cap_anterior is not None:
-        t_captura_ms = (t_cap - t_cap_anterior) * 1000.0
-    t_cap_anterior = t_cap
+    # (1) Capture + transmission
+    t_capture_ms = None
+    if t_prev_capture is not None:
+        t_capture_ms = (t_capture - t_prev_capture) * 1000.0
+    t_prev_capture = t_capture
 
-    # (2) inferencia
+    # (2) Inference
     t0 = time.perf_counter()
-    r = modelo.predict(frame, conf=CONF_MIN, verbose=False)[0]
-    t_inferencia_ms = (time.perf_counter() - t0) * 1000.0
+    r = model.predict(frame, conf=CONF_MIN, verbose=False)[0]
+    t_inference_ms = (time.perf_counter() - t0) * 1000.0
 
-    # so a deteccao mais confiante do frame
-    nome_det = ""
-    conf_det = 0.0
+    # Keep only the most confident detection in the frame
+    det_name = ""
+    det_conf = 0.0
     x1 = y1 = x2 = y2 = 0
-    tem_det = False
+    has_det = False
     if len(r.boxes):
         i = int(r.boxes.conf.argmax())
         x1, y1, x2, y2 = map(int, r.boxes.xyxy[i].tolist())
-        conf_det = float(r.boxes.conf[i])
-        nome_det = r.names[int(r.boxes.cls[i])]
-        tem_det = True
+        det_conf = float(r.boxes.conf[i])
+        det_name = r.names[int(r.boxes.cls[i])]
+        has_det = True
 
-    # (3) decisao
+    # (3) Decision
     t0 = time.perf_counter()
-    agora = time.perf_counter()
+    now = time.perf_counter()
 
-    if estado == "PROCURANDO":
-        comando_ativo = "frente"
-        if tem_det:
-            estado = "APROXIMANDO"
+    if state == "SEARCHING":
+        active_command = "forward"
+        if has_det:
+            state = "APPROACHING"
 
-    elif estado == "APROXIMANDO":
-        comando_ativo = "frente"
-        if not tem_det:
-            estado = "PROCURANDO"
-        elif (x2 - x1) >= LIMIAR_BBOX_W:
-            # Decisao tomada UMA vez e travada. Se continuasse aberta, a placa
-            # saindo do quadro faria o robo mudar de ideia no meio da manobra.
-            comando_emitido = None
-            for chave in sorted(NOME_MODELO, key=len, reverse=True):
-                if nome_det.startswith(chave):      # do mais longo pro mais
-                    comando_emitido = NOME_MODELO[chave]   # curto, senao R-4a
-                    break                                   # cairia em R-4
-            classe_decidida = nome_det
-            conf_decidida = conf_det
-            if comando_emitido is None:
-                # Nome do modelo fora do mapa: encerra em vez de seguir reto,
-                # senao o robo andaria ate o timeout e sairia da mesa.
-                print(f"!! classe '{nome_det}' nao esta em NOME_MODELO")
-                estado = "VEREDITO"
+    elif state == "APPROACHING":
+        active_command = "forward"
+        if not has_det:
+            state = "SEARCHING"
+        elif (x2 - x1) >= BBOX_W_THRESHOLD:
+            # The decision is made once and locked, so that the sign leaving
+            # the frame during the maneuver cannot change it.
+            issued_command = None
+            # Longest prefix first, so that "R-4a" is not matched as "R-4"
+            for key in sorted(MODEL_CLASS_COMMAND, key=len, reverse=True):
+                if det_name.startswith(key):
+                    issued_command = MODEL_CLASS_COMMAND[key]
+                    break
+            decided_class = det_name
+            decided_conf = det_conf
+            if issued_command is None:
+                # Unknown class name: end the run instead of driving forward
+                # until the timeout
+                print(f"Class '{det_name}' is not in MODEL_CLASS_COMMAND")
+                state = "VERDICT"
             else:
-                comando_ativo = comando_emitido
-                t_fim_acao = agora + DURACAO[comando_emitido] / 1000.0
-                estado = "AGINDO"
+                active_command = issued_command
+                t_action_end = now + ACTION_DURATION[issued_command] / 1000.0
+                state = "ACTING"
 
-    elif estado == "AGINDO":
-        # A inferencia segue rodando e sendo registrada (evidencia do que o
-        # modelo via durante a manobra), mas nao muda mais a decisao.
-        if agora >= t_fim_acao:
-            estado = "VEREDITO"
+    elif state == "ACTING":
+        # Inference keeps running and being logged during the maneuver, but
+        # no longer affects the decision
+        if now >= t_action_end:
+            state = "VERDICT"
 
-    if estado in ("PROCURANDO", "APROXIMANDO", "AGINDO") and \
-       (agora - t_ini) > TIMEOUT_CORRIDA_S:
-        estado = "VEREDITO"
+    if state in ("SEARCHING", "APPROACHING", "ACTING") and \
+       (now - t_start) > RUN_TIMEOUT_S:
+        state = "VERDICT"
 
-    t_decisao_ms = (time.perf_counter() - t0) * 1000.0
+    t_decision_ms = (time.perf_counter() - t0) * 1000.0
 
-    # (4) comando: reenvio periodico mantem o failsafe do firmware satisfeito
-    t_comando_ms = None
-    comando_enviado = ""
+    # (4) Command
+    t_command_ms = None
+    command_sent = ""
 
-    # Fim da corrida: para NA HORA. Se dependesse do failsafe, os motores
-    # rodariam ate 900 ms alem do fim da manobra e a duracao calibrada
-    # nao teria relacao com o giro real.
-    if estado == "VEREDITO" and t_fim_corrida is None:
-        t_fim_corrida = agora
+    # Stop now instead of waiting up to 900 ms for the firmware failsafe
+    if state == "VERDICT" and t_run_end is None:
+        t_run_end = now
         t0 = time.perf_counter()
         try:
-            requests.get(URL_CMD, params={"dir": "parar",
-                                          "vel": VELOCIDADE}, timeout=1.0)
+            requests.get(CMD_URL, params={"dir": "stop", "speed": SPEED}, timeout=1.0)
         except requests.RequestException:
             pass
-        t_comando_ms = (time.perf_counter() - t0) * 1000.0
-        comando_enviado = "parar"
-        comando_ativo = "parar"
+        t_command_ms = (time.perf_counter() - t0) * 1000.0
+        command_sent = "stop"
+        active_command = "stop"
 
-    if estado in ("PROCURANDO", "APROXIMANDO", "AGINDO") and \
-       (agora - ultimo_envio) * 1000.0 >= REENVIO_MS:
+    # Periodic resend keeps the firmware failsafe from stopping the motors
+    if state in ("SEARCHING", "APPROACHING", "ACTING") and \
+       (now - last_send) * 1000.0 >= RESEND_MS:
         t0 = time.perf_counter()
         try:
-            requests.get(URL_CMD, params={"dir": comando_ativo,
-                                          "vel": VELOCIDADE}, timeout=1.0)
+            requests.get(CMD_URL, params={"dir": active_command, "speed": SPEED},
+                         timeout=1.0)
         except requests.RequestException:
             pass
-        t_comando_ms = (time.perf_counter() - t0) * 1000.0
-        comando_enviado = comando_ativo
-        ultimo_envio = agora
+        t_command_ms = (time.perf_counter() - t0) * 1000.0
+        command_sent = active_command
+        last_send = now
 
-    # ---------------- desenho ----------------
-    vis = frame.copy()
-    if tem_det:
-        cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(vis, f"{nome_det} {conf_det:.2f}", (x1, max(20, y1 - 8)),
+    # ----------------------------- Display ----------------------------
+    view = frame.copy()
+    if has_det:
+        cv2.rectangle(view, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(view, f"{det_name} {det_conf:.2f}", (x1, max(20, y1 - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cor = (0, 0, 255) if (x2 - x1) >= LIMIAR_BBOX_W else (0, 255, 255)
-        cv2.putText(vis, f"bbox_w {x2 - x1}  (limiar {LIMIAR_BBOX_W})",
-                    (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, cor, 2)
+        color = (0, 0, 255) if (x2 - x1) >= BBOX_W_THRESHOLD else (0, 255, 255)
+        cv2.putText(view, f"bbox_w {x2 - x1}  (threshold {BBOX_W_THRESHOLD})",
+                    (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-    cv2.putText(vis, f"[{estado}]", (10, 30),
+    cv2.putText(view, f"[{state}]", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-    cv2.putText(vis, f"alvo: {classe_alvo}", (10, 60),
+    cv2.putText(view, f"target: {target_class}", (10, 60),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    cv2.putText(vis, f"cmd: {comando_ativo or '-'}", (10, 85),
+    cv2.putText(view, f"cmd: {active_command or '-'}", (10, 85),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    if estado == "VEREDITO":
-        cv2.putText(vis, "manobra executada?  s / n", (10, 140),
+    if state == "VERDICT":
+        cv2.putText(view, "maneuver executed?  y / n", (10, 140),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
-    # ---------------- registro ----------------
-    if estado in ("PROCURANDO", "APROXIMANDO", "AGINDO"):
+    # ------------------------------ Logging ---------------------------
+    if state in ("SEARCHING", "APPROACHING", "ACTING"):
         frame_id += 1
-        linhas.append({
+        rows.append({
             "frame_id": frame_id,
-            "t_rel_s": round(agora - t_ini, 3),
-            "t_captura_ms": round(t_captura_ms, 2) if t_captura_ms is not None else "",
-            "t_inferencia_ms": round(t_inferencia_ms, 2),
-            "t_decisao_ms": round(t_decisao_ms, 3),
-            "t_comando_ms": round(t_comando_ms, 2) if t_comando_ms is not None else "",
-            "classe_detectada": nome_det,
-            "confianca": round(conf_det, 3) if tem_det else "",
-            "bbox_w": x2 - x1 if tem_det else "",
-            "bbox_h": y2 - y1 if tem_det else "",
-            "estado": estado,
-            "comando_enviado": comando_enviado,
+            "t_rel_s": round(now - t_start, 3),
+            "t_capture_ms": round(t_capture_ms, 2) if t_capture_ms is not None else "",
+            "t_inference_ms": round(t_inference_ms, 2),
+            "t_decision_ms": round(t_decision_ms, 3),
+            "t_command_ms": round(t_command_ms, 2) if t_command_ms is not None else "",
+            "detected_class": det_name,
+            "confidence": round(det_conf, 3) if has_det else "",
+            "bbox_w": x2 - x1 if has_det else "",
+            "bbox_h": y2 - y1 if has_det else "",
+            "state": state,
+            "command_sent": command_sent,
         })
         if video is not None:
-            video.write(vis)
+            video.write(view)
 
-    cv2.imshow("experimento", vis)
+    cv2.imshow("experiment", view)
     k = cv2.waitKey(1) & 0xFF
 
-    # ---------------- teclas ----------------
+    # ------------------------------- Keys -----------------------------
     if k == ord("q"):
         break
 
-    if estado == "VEREDITO" and k in (ord("s"), ord("n")):
-        # Robo ja parou no primeiro frame deste estado; aqui so grava.
+    if state == "VERDICT" and k in (ord("y"), ord("n")):
+        # The robot already stopped on the first frame of this state
         if video is not None:
-            video.release()      # o mp4 so ganha cabecalho valido aqui
+            video.release()      # the mp4 header is only written on release
             video = None
 
-        with open(pasta / "frames.csv", "w", newline="") as fp:
-            w = csv.DictWriter(fp, fieldnames=COLUNAS)
+        with open(folder / "frames.csv", "w", newline="") as fp:
+            w = csv.DictWriter(fp, fieldnames=COLUMNS)
             w.writeheader()
-            w.writerows(linhas)
+            w.writerows(rows)
 
-        with open(pasta / "meta.json", "w") as fp:
+        with open(folder / "meta.json", "w") as fp:
             json.dump({
-                "run": nome_run,
-                "classe_esperada": classe_alvo,
-                "comando_esperado": COMANDO_CORRETO[classe_alvo],
-                "classe_detectada": classe_decidida,
-                "confianca_decisao": conf_decidida,
-                "comando_emitido": comando_emitido,
-                "decisao_correta": comando_emitido == COMANDO_CORRETO[classe_alvo],
-                "manobra_executada": k == ord("s"),
-                "datahora": datetime.now().isoformat(timespec="seconds"),
-                "duracao_corrida_s": round(t_fim_corrida - t_ini, 2),
+                "run": run_name,
+                "expected_class": target_class,
+                "expected_command": EXPECTED_COMMAND[target_class],
+                "detected_class": decided_class,
+                "decision_confidence": decided_conf,
+                "issued_command": issued_command,
+                "correct_decision": issued_command == EXPECTED_COMMAND[target_class],
+                "maneuver_executed": k == ord("y"),
+                "datetime": datetime.now().isoformat(timespec="seconds"),
+                "run_duration_s": round(t_run_end - t_start, 2),
                 "n_frames": frame_id,
-                "modelo": MODELO,
+                "model": MODEL,
                 "conf_min": CONF_MIN,
-                "limiar_bbox_w": LIMIAR_BBOX_W,
-                "duracao_acao_ms": DURACAO.get(comando_emitido),
-                "velocidade": VELOCIDADE,
+                "bbox_w_threshold": BBOX_W_THRESHOLD,
+                "action_duration_ms": ACTION_DURATION.get(issued_command),
+                "speed": SPEED,
                 "flip": FLIP,
             }, fp, indent=2, ensure_ascii=False)
 
-        print(f"  salvo: {pasta} | emitido={comando_emitido} "
-              f"| esperado={COMANDO_CORRETO[classe_alvo]}")
-        linhas = []
+        print(f"  saved: {folder} | issued={issued_command} "
+              f"| expected={EXPECTED_COMMAND[target_class]}")
+        rows = []
         frame_id = 0
-        comando_ativo = None
-        comando_emitido = classe_decidida = conf_decidida = None
-        t_fim_corrida = None
-        estado = "MANUAL"
+        active_command = None
+        issued_command = decided_class = decided_conf = None
+        t_run_end = None
+        state = "MANUAL"
         continue
 
-    if estado == "MANUAL":
+    if state == "MANUAL":
         if k in CLASSES:
-            classe_alvo = CLASSES[k]
-            print(f"classe alvo -> {classe_alvo}")
+            target_class = CLASSES[k]
+            print(f"target class -> {target_class}")
 
         elif k in MANUAL:
             try:
-                requests.get(URL_CMD, params={"dir": MANUAL[k],
-                                              "vel": VELOCIDADE}, timeout=1.0)
+                requests.get(CMD_URL, params={"dir": MANUAL[k], "speed": SPEED},
+                             timeout=1.0)
             except requests.RequestException:
                 pass
 
-        elif k in (10, 13):   # ENTER = largada (10 ou 13 dependendo do SO)
-            base = RAIZ / classe_alvo
+        elif k in (10, 13):   # ENTER is 10 or 13 depending on the OS
+            base = ROOT / target_class
             base.mkdir(parents=True, exist_ok=True)
             n = 1
             while (base / f"run{n:02d}").exists():
                 n += 1
-            nome_run = f"run{n:02d}"
-            pasta = base / nome_run
-            pasta.mkdir()
-            altura, largura = frame.shape[:2]
-            video = cv2.VideoWriter(str(pasta / "video.mp4"),
+            run_name = f"run{n:02d}"
+            folder = base / run_name
+            folder.mkdir()
+            height, width = frame.shape[:2]
+            video = cv2.VideoWriter(str(folder / "video.mp4"),
                                     cv2.VideoWriter_fourcc(*"mp4v"),
-                                    FPS_VIDEO, (largura, altura))
-            linhas = []
+                                    VIDEO_FPS, (width, height))
+            rows = []
             frame_id = 0
-            t_ini = time.perf_counter()
-            ultimo_envio = 0.0
-            t_fim_corrida = None
-            estado = "PROCURANDO"
-            print(f"LARGADA {classe_alvo} / {nome_run}")
+            t_start = time.perf_counter()
+            last_send = 0.0
+            t_run_end = None
+            state = "SEARCHING"
+            print(f"START {target_class} / {run_name}")
 
-# ===================== SAIDA ==============================================
+# ------------------------------ Shutdown ------------------------------
 
 try:
-    requests.get(URL_CMD, params={"dir": "parar", "vel": VELOCIDADE}, timeout=1.0)
+    requests.get(CMD_URL, params={"dir": "stop", "speed": SPEED}, timeout=1.0)
 except requests.RequestException:
     pass
 if video is not None:
